@@ -381,6 +381,7 @@ ret:
 /* Huaqin modify for ZQL1650-1523 by zhangxiude at 2018/07/18 start */
 extern long syna_gesture_mode;
 /* Huaqin modify for ZQL1650-1523 by zhangxiude at 2018/07/18 end */
+
 int mdss_dsi_panel_reset(struct mdss_panel_data *pdata, int enable)
 {
 	struct mdss_dsi_ctrl_pdata *ctrl_pdata = NULL;
