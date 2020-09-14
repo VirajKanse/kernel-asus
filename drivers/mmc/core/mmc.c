@@ -28,6 +28,10 @@
 #include "mmc_ops.h"
 #include "sd_ops.h"
 
+/* Huaqin add for ZQL1650-43 by lanshiming at 2018/1/18 start*/
+static int IS_BOOT_TIME = 1;
+/* Huaqin add for ZQL1650-43 by lanshiming at 2018/1/18 end*/
+
 static const unsigned int tran_exp[] = {
 	10000,		100000,		1000000,	10000000,
 	0,		0,		0,		0
@@ -61,6 +65,138 @@ static const unsigned int tacc_mant[] = {
 		__res & __mask;						\
 	})
 
+/* Huaqin add for ZQL1650-43 by lanshiming at 2018/1/18 start*/
+static struct {
+	u32 manfid;
+	char *band_type;
+} emmc_vendor_tbl[] = {
+	{ 0x90, "HYNIX" },
+	{ 0x15, "SAMSUNG" },
+	{ 0x45, "SANDISK" },
+	{ 0x70, "KINGSTON" },
+	{ 0x13, "MICRON" },
+	{ 0x10001, "TOSHIBA" },
+};
+
+#define EMMC_VENDOR_TBL_MAX	(sizeof(emmc_vendor_tbl)/sizeof(emmc_vendor_tbl[0]))
+
+static char whole_name[256] = {0};
+
+static char* asus_get_emmc_status(struct mmc_card *card)
+{
+	u32 i;
+	static char c_date[9] = {0};
+
+	struct timeval now;
+	struct tm tm_val;
+
+	do_gettimeofday(&now);
+	time_to_tm(now.tv_sec, 0, &tm_val);
+
+	for (i = 0; i < EMMC_VENDOR_TBL_MAX; i++) {
+		if (card->cid.manfid == emmc_vendor_tbl[i].manfid) {
+			memset(whole_name, 0, sizeof(whole_name));
+			strcpy(whole_name, emmc_vendor_tbl[i].band_type);
+			if (8 == card->ext_csd.rev)
+				strcat(whole_name, "-v5.1-");
+			else if (7 == card->ext_csd.rev)
+				strcat(whole_name, "-v5.0-");
+			else if (6 == card->ext_csd.rev)
+				strcat(whole_name, "-v4.5-");
+			else if (5 == card->ext_csd.rev)
+				strcat(whole_name, "-v4.41-");
+
+			strcat(whole_name, card->mmc_total_size);
+			strcat(whole_name, "G-");
+			strcat(whole_name, "eMMC-");
+			sprintf(c_date, "%d%02d%02d", (int)(1900 + tm_val.tm_year), (int)(1+ tm_val.tm_mon), (int)(tm_val.tm_mday));
+			strcat(whole_name, c_date);
+
+			return whole_name;
+		}
+	}
+	return "Unknown";
+}
+
+static char emmc_health[128];
+static char* asus_get_emmc_health(struct mmc_card *card)
+{
+	int err = 0;
+	u8 *ext_csd = NULL;
+
+	BUG_ON(!card);
+
+	if(IS_BOOT_TIME == 0){ // Need to update ext_csd data
+		pr_info("%s: Need to update EXT_CSD data\n", __func__);
+		pm_runtime_get_sync(&card->dev);
+		mmc_claim_host(card->host);
+		if (mmc_bus_needs_resume(card->host))
+			mmc_resume_bus(card->host);
+
+		if (mmc_card_cmdq(card)) {
+			err = mmc_cmdq_halt_on_empty_queue(card->host);
+			if (err) {
+				pr_err("%s: halt failed while doing %s err (%d)\n",
+						mmc_hostname(card->host), __func__,
+						err);
+				mmc_put_card(card);
+			}
+		}
+
+		err = mmc_get_ext_csd(card, &ext_csd);
+		if (err || !ext_csd) {
+			pr_err("%s: mmc_get_ext_csd failed (%d)\n", __func__, err);
+			goto out_free;
+		}
+
+		/*err = mmc_decode_ext_csd(card, ext_csd);
+		if(err){
+			pr_err("%s: mmc_decode_ext_csd failed (%d)\n", __func__, err);
+		}*/
+		card->ext_csd.pre_eol_info = ext_csd[EXT_CSD_PRE_EOL_INFO];
+		card->ext_csd.device_life_time[0] = ext_csd[268]; //life time for type A
+		card->ext_csd.device_life_time[1] = ext_csd[269]; //life time for type B
+
+		if (mmc_card_cmdq(card)) {
+			if (mmc_cmdq_halt(card->host, false))
+				pr_err("%s: %s: cmdq unhalt failed\n",
+					   mmc_hostname(card->host), __func__);
+		}
+		mmc_put_card(card);
+	}else{ // Don't need to read ext_csd data because it is already up to date.
+		pr_info("%s: Do not need to read EXT_CSD data because it is already up to date.\n", __func__);
+		IS_BOOT_TIME = 0;
+	}
+
+	memset(emmc_health, 0, sizeof(emmc_health));
+	if (card->ext_csd.rev > 6)
+		sprintf(emmc_health, "0x%02x-0x%02x-0x%02x-%s", card->ext_csd.pre_eol_info, card->ext_csd.device_life_time[0], card->ext_csd.device_life_time[1], whole_name);
+	else
+		sprintf(emmc_health, "NoSupport-%s", whole_name);
+
+	kfree(ext_csd);
+	return emmc_health;
+
+out_free:
+	if (mmc_card_cmdq(card)) {
+		if (mmc_cmdq_halt(card->host, false))
+			pr_err("%s: %s: cmdq unhalt failed\n",
+			       mmc_hostname(card->host), __func__);
+	}
+	mmc_put_card(card);
+
+	sprintf(emmc_health, "NoSupport-%s", whole_name);
+
+	return emmc_health;
+}
+
+static char* asus_get_emmc_total_size(struct mmc_card *card)
+{
+	BUG_ON(!card);
+
+	return card->mmc_total_size;
+}
+/* Huaqin add for ZQL1650-43 by lanshiming at 2018/1/18 end*/
 static int mmc_switch_status(struct mmc_card *card, bool ignore_crc);
 /*
  * Given the decoded CSD structure, decode the raw CID to our CID structure.
@@ -400,6 +536,16 @@ static int mmc_decode_ext_csd(struct mmc_card *card, u8 *ext_csd)
 		/* Cards with density > 2GiB are sector addressed */
 		if (card->ext_csd.sectors > (2u * 1024 * 1024 * 1024) / 512)
 			mmc_card_set_blockaddr(card);
+/* Huaqin add for ZQL1650-43 by lanshiming at 2018/1/18 start*/
+		if(card->ext_csd.sectors > 80000000)
+			sprintf(card->mmc_total_size, "64");
+		else if(card->ext_csd.sectors > 50000000)
+			sprintf(card->mmc_total_size, "32");
+		else if(card->ext_csd.sectors > 20000000)
+			sprintf(card->mmc_total_size, "16");
+		else
+			sprintf(card->mmc_total_size, "8");
+/* Huaqin add for ZQL1650-43 by lanshiming at 2018/1/18 end*/
 	}
 
 	card->ext_csd.raw_card_type = ext_csd[EXT_CSD_CARD_TYPE];
@@ -542,7 +688,7 @@ static int mmc_decode_ext_csd(struct mmc_card *card, u8 *ext_csd)
 			card->ext_csd.raw_bkops_status =
 				ext_csd[EXT_CSD_BKOPS_STATUS];
 			if (!card->ext_csd.bkops_en)
-				pr_info("%s: BKOPS_EN equals 0x%x\n",
+				pr_debug("%s: BKOPS_EN equals 0x%x\n",
 					mmc_hostname(card->host),
 					card->ext_csd.bkops_en);
 		}
@@ -666,11 +812,21 @@ static int mmc_decode_ext_csd(struct mmc_card *card, u8 *ext_csd)
 		card->ext_csd.enhanced_rpmb_supported =
 			(card->ext_csd.rel_param &
 			 EXT_CSD_WR_REL_PARAM_EN_RPMB_REL_WR);
+		/* Huaqin add for ZQL1650-43 by lanshiming at 2018/1/18 start*/
+		card->ext_csd.pre_eol_info = ext_csd[EXT_CSD_PRE_EOL_INFO];
+		card->ext_csd.device_life_time[0] = ext_csd[EXT_CSD_DEVICE_LIFE_TIME_EST_TYP_A];
+		card->ext_csd.device_life_time[1] = ext_csd[EXT_CSD_DEVICE_LIFE_TIME_EST_TYP_B];
+		/* Huaqin add for ZQL1650-43 by lanshiming at 2018/1/18 end*/
 	} else {
 		card->ext_csd.cmdq_support = 0;
 		card->ext_csd.cmdq_depth = 0;
 		card->ext_csd.barrier_support = 0;
 		card->ext_csd.cache_flush_policy = 0;
+		/* Huaqin add for ZQL1650-43 by lanshiming at 2018/1/18 start*/
+		card->ext_csd.pre_eol_info = 0;
+		card->ext_csd.device_life_time[0] = 0;
+		card->ext_csd.device_life_time[1] = 0;
+		/* Huaqin add for ZQL1650-43 by lanshiming at 2018/1/18 end*/
 	}
 
 	/* eMMC v5 or later */
@@ -832,6 +988,14 @@ MMC_DEV_ATTR(raw_rpmb_size_mult, "%#x\n", card->ext_csd.raw_rpmb_size_mult);
 MMC_DEV_ATTR(enhanced_rpmb_supported, "%#x\n",
 		card->ext_csd.enhanced_rpmb_supported);
 MMC_DEV_ATTR(rel_sectors, "%#x\n", card->ext_csd.rel_sectors);
+/* Huaqin add for ZQL1650-43 by lanshiming at 2018/1/18 start*/
+MMC_DEV_ATTR(emmc_status, "%s\n", asus_get_emmc_status(card));
+
+MMC_DEV_ATTR(emmc_health, "%s\n", asus_get_emmc_health(card));
+MMC_DEV_ATTR(emmc_health_A, "0x%02x\n", card->ext_csd.device_life_time[0]);
+MMC_DEV_ATTR(emmc_health_B, "0x%02x\n", card->ext_csd.device_life_time[1]);
+MMC_DEV_ATTR(emmc_total_size, "%s\n", asus_get_emmc_total_size(card));
+/* Huaqin add for ZQL1650-43 by lanshiming at 2018/1/18 end*/
 
 static ssize_t mmc_fwrev_show(struct device *dev,
 			      struct device_attribute *attr,
@@ -871,6 +1035,14 @@ static struct attribute *mmc_std_attrs[] = {
 	&dev_attr_raw_rpmb_size_mult.attr,
 	&dev_attr_enhanced_rpmb_supported.attr,
 	&dev_attr_rel_sectors.attr,
+/* Huaqin add for ZQL1650-43 by lanshiming at 2018/1/18 start*/
+	&dev_attr_emmc_status.attr,
+
+	&dev_attr_emmc_health.attr,
+	&dev_attr_emmc_health_A.attr,
+	&dev_attr_emmc_health_B.attr,
+	&dev_attr_emmc_total_size.attr,
+/* Huaqin add for ZQL1650-43 by lanshiming at 2018/1/18 end*/
 	NULL,
 };
 ATTRIBUTE_GROUPS(mmc_std);
@@ -1061,7 +1233,7 @@ static int mmc_select_bus_width(struct mmc_card *card)
 			break;
 		} else {
 			pr_warn("%s: switch to bus width %d failed\n",
-				mmc_hostname(host), ext_csd_bits[idx]);
+				mmc_hostname(host), 1 << bus_width);
 		}
 	}
 
@@ -1415,10 +1587,11 @@ static int mmc_select_hs200(struct mmc_card *card)
 {
 	struct mmc_host *host = card->host;
 	bool send_status = true;
-	unsigned int old_timing;
+	unsigned int old_timing, old_signal_voltage;
 	int err = -EINVAL;
 	u8 val;
 
+	old_signal_voltage = host->ios.signal_voltage;
 	if (card->mmc_avail_type & EXT_CSD_CARD_TYPE_HS200_1_2V)
 		err = __mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_120);
 
@@ -1427,7 +1600,7 @@ static int mmc_select_hs200(struct mmc_card *card)
 
 	/* If fails try again during next card power cycle */
 	if (err)
-		goto err;
+		return err;
 
 	mmc_select_driver_type(card);
 
@@ -1466,9 +1639,14 @@ static int mmc_select_hs200(struct mmc_card *card)
 		}
 	}
 err:
-	if (err)
+	if (err) {
+		/* fall back to the old signal voltage, if fails report error */
+		if (__mmc_set_signal_voltage(host, old_signal_voltage))
+			err = -EIO;
+
 		pr_err("%s: %s failed, error %d\n", mmc_hostname(card->host),
 		       __func__, err);
+	}
 	return err;
 }
 
@@ -2087,9 +2265,11 @@ reinit:
 		if (err) {
 			pr_warn("%s: Enabling HPI failed\n",
 				mmc_hostname(card->host));
+			card->ext_csd.hpi_en = 0;
 			err = 0;
-		} else
+		} else {
 			card->ext_csd.hpi_en = 1;
+		}
 	}
 
 	/*
